@@ -59,6 +59,17 @@ if os.environ.get("TS_IPEX_ENABLE", "false") == "true":
         )
 
 
+TORCH_XLA_AVAILABLE = False
+if os.environ.get("TORCH_XLA_AVAILABLE"):
+    try:
+        import torch_xla.core.xla_model as xm
+        TORCH_XLA_AVAILABLE = True
+    except ImportError as error:
+        logger.warning(
+            "Cloud TPU is enabled but torch_xla is not installed."
+        )
+
+
 class BaseHandler(abc.ABC):
     """
     Base default handler to load torchscript or eager mode [state_dict] models
@@ -112,6 +123,11 @@ class BaseHandler(abc.ABC):
             if torch.cuda.is_available() and properties.get("gpu_id") is not None
             else self.map_location
         )
+
+        if TORCH_XLA_AVAILABLE:
+            self.map_location = None
+            self.device = xm.xla_device()
+
         self.manifest = context.manifest
 
         model_dir = properties.get("model_dir")
@@ -146,7 +162,7 @@ class BaseHandler(abc.ABC):
 
         # Convert your model by following instructions: https://pytorch.org/tutorials/intermediate/nvfuser_intro_tutorial.html
         # For TensorRT support follow instructions here: https://pytorch.org/TensorRT/getting_started/getting_started_with_python_api.html#getting-started-with-python-api
-        elif self.model_pt_path.endswith(".pt"):
+        elif self.model_pt_path.endswith(".pt") and not TORCH_XLA_AVAILABLE:
             self.model = self._load_torchscript_model(self.model_pt_path)
             self.model.eval()
 
@@ -245,7 +261,7 @@ class BaseHandler(abc.ABC):
         model_class = model_class_definitions[0]
         model = model_class()
         if model_pt_path:
-            state_dict = torch.load(model_pt_path, map_location=self.device)
+            state_dict = torch.load(model_pt_path, map_location=self.device if not TORCH_XLA_AVAILABLE else None)
             model.load_state_dict(state_dict)
         return model
 
