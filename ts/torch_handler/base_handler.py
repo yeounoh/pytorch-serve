@@ -59,11 +59,11 @@ if os.environ.get("TS_IPEX_ENABLE", "false") == "true":
         )
 
 
-TORCH_XLA_AVAILABLE = False
-if os.environ.get("TORCH_XLA_AVAILABLE"):
+TPUVM_MODE = False
+if os.environ.get("TPUVM_MODE"):
     try:
         import torch_xla.core.xla_model as xm
-        TORCH_XLA_AVAILABLE = True
+        TPUVM_MODE = True
     except ImportError as error:
         logger.warning(
             "Cloud TPU is enabled but torch_xla is not installed."
@@ -124,7 +124,7 @@ class BaseHandler(abc.ABC):
             else self.map_location
         )
 
-        if TORCH_XLA_AVAILABLE:
+        if TPUVM_MODE:
             self.map_location = None
             self.device = xm.xla_device()
 
@@ -162,7 +162,7 @@ class BaseHandler(abc.ABC):
 
         # Convert your model by following instructions: https://pytorch.org/tutorials/intermediate/nvfuser_intro_tutorial.html
         # For TensorRT support follow instructions here: https://pytorch.org/TensorRT/getting_started/getting_started_with_python_api.html#getting-started-with-python-api
-        elif self.model_pt_path.endswith(".pt") and not TORCH_XLA_AVAILABLE:
+        elif self.model_pt_path.endswith(".pt") and not TPUVM_MODE:
             self.model = self._load_torchscript_model(self.model_pt_path)
             self.model.eval()
 
@@ -261,7 +261,7 @@ class BaseHandler(abc.ABC):
         model_class = model_class_definitions[0]
         model = model_class()
         if model_pt_path:
-            state_dict = torch.load(model_pt_path, map_location=self.device if not TORCH_XLA_AVAILABLE else None)
+            state_dict = torch.load(model_pt_path, map_location=self.device if not TPUVM_MODE else None)
             model.load_state_dict(state_dict)
         return model
 
@@ -294,6 +294,9 @@ class BaseHandler(abc.ABC):
         with torch.no_grad():
             marshalled_data = data.to(self.device)
             results = self.model(marshalled_data, *args, **kwargs)
+            if TPUVM_MODE:
+                xm.mark_step()
+
         return results
 
     def postprocess(self, data):
