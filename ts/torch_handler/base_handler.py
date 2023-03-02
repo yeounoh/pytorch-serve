@@ -8,6 +8,7 @@ import importlib.util
 import logging
 import os
 import time
+import numpy as np
 
 import torch
 from pkg_resources import packaging
@@ -64,10 +65,19 @@ if os.environ.get("TPUVM_MODE"):
     try:
         import torch_xla.core.xla_model as xm
         TPUVM_MODE = True
+
     except ImportError as error:
         logger.warning(
             "Cloud TPU is enabled but torch_xla is not installed."
         )
+
+    try:
+        import torch_xla.experimental.xla_sharding as xs
+        from torch_xla.experimental.xla_sharding import Mesh
+
+    except ImportError as error:
+        logger.warning("PTXLA SPMD libs are not available.")
+
 
 
 class BaseHandler(abc.ABC):
@@ -159,6 +169,21 @@ class BaseHandler(abc.ABC):
             )
             self.model.to(self.device)
             self.model.eval()
+
+            if TPUVM_MODE:
+                # TODO(yeounoh) create mesh
+                num_devices = len(xm.get_xla_supported_devices())
+                mesh_shape = (2, num_devices // 2, 1, 1)
+                device_ids = np.arange(num_devices)
+                mesh = xs.Mesh(device_ids, mesh_shape, ('w', 'x', 'y', 'z'))
+                partition_spec = (0, 1, 2, 3)  # Apply sharding along all axes
+                
+                # TODO(yeounoh) shard conv2D layers
+                for name, layer in self.model.named_modules():
+                    if 'conv' in name:
+                        xs.mark_sharding(layer.weight, mesh, partition_spec)
+                        logger.info(f"Sharding {name} over {mesh.mesh_shape} mesh")
+
 
         # Convert your model by following instructions: https://pytorch.org/tutorials/intermediate/nvfuser_intro_tutorial.html
         # For TensorRT support follow instructions here: https://pytorch.org/TensorRT/getting_started/getting_started_with_python_api.html#getting-started-with-python-api
