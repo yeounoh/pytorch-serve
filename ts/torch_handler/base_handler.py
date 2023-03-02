@@ -8,6 +8,7 @@ import importlib.util
 import logging
 import os
 import time
+import numpy as np
 
 import torch
 from pkg_resources import packaging
@@ -57,6 +58,26 @@ if os.environ.get("TS_IPEX_ENABLE", "false") == "true":
         logger.warning(
             "IPEX is enabled but intel-extension-for-pytorch is not installed. Proceeding without IPEX."
         )
+
+
+TPUVM_MODE = False
+if os.environ.get("TPUVM_MODE"):
+    try:
+        import torch_xla.core.xla_model as xm
+        TPUVM_MODE = True
+
+    except ImportError as error:
+        logger.warning(
+            "Cloud TPU is enabled but torch_xla is not installed."
+        )
+
+    try:
+        import torch_xla.experimental.xla_sharding as xs
+        from torch_xla.experimental.xla_sharding import Mesh
+
+    except ImportError as error:
+        logger.warning("PTXLA SPMD libs are not available.")
+
 
 
 class BaseHandler(abc.ABC):
@@ -112,6 +133,11 @@ class BaseHandler(abc.ABC):
             if torch.cuda.is_available() and properties.get("gpu_id") is not None
             else self.map_location
         )
+
+        if TPUVM_MODE:
+            self.map_location = None
+            self.device = xm.xla_device()
+
         self.manifest = context.manifest
 
         model_dir = properties.get("model_dir")
@@ -144,9 +170,24 @@ class BaseHandler(abc.ABC):
             self.model.to(self.device)
             self.model.eval()
 
+            if TPUVM_MODE:
+                # TODO(yeounoh) create mesh
+                num_devices = len(xm.get_xla_supported_devices())
+                mesh_shape = (2, num_devices // 2, 1, 1)
+                device_ids = np.arange(num_devices)
+                mesh = xs.Mesh(device_ids, mesh_shape, ('w', 'x', 'y', 'z'))
+                partition_spec = (0, 1, 2, 3)  # Apply sharding along all axes
+                
+                # TODO(yeounoh) shard conv2D layers
+                for name, layer in self.model.named_modules():
+                    if 'conv' in name:
+                        xs.mark_sharding(layer.weight, mesh, partition_spec)
+                        logger.info(f"Sharding {name} over {mesh.mesh_shape} mesh")
+
+
         # Convert your model by following instructions: https://pytorch.org/tutorials/intermediate/nvfuser_intro_tutorial.html
         # For TensorRT support follow instructions here: https://pytorch.org/TensorRT/getting_started/getting_started_with_python_api.html#getting-started-with-python-api
-        elif self.model_pt_path.endswith(".pt"):
+        elif self.model_pt_path.endswith(".pt") and not TPUVM_MODE:
             self.model = self._load_torchscript_model(self.model_pt_path)
             self.model.eval()
 
@@ -245,7 +286,7 @@ class BaseHandler(abc.ABC):
         model_class = model_class_definitions[0]
         model = model_class()
         if model_pt_path:
-            state_dict = torch.load(model_pt_path, map_location=self.device)
+            state_dict = torch.load(model_pt_path, map_location=self.device if not TPUVM_MODE else None)
             model.load_state_dict(state_dict)
         return model
 
@@ -278,6 +319,9 @@ class BaseHandler(abc.ABC):
         with torch.no_grad():
             marshalled_data = data.to(self.device)
             results = self.model(marshalled_data, *args, **kwargs)
+            if TPUVM_MODE:
+                xm.mark_step()
+
         return results
 
     def postprocess(self, data):
